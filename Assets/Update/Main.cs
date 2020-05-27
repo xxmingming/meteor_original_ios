@@ -13,7 +13,7 @@ using Idevgame.StateManagement;
 
 
 public class Main : MonoBehaviour {
-	public static Main Instance = null;
+	public static Main Ins = null;
 #if LOCALHOST
     public static string strHost = "127.0.0.1";
     public static int port = 80;
@@ -52,7 +52,8 @@ public class Main : MonoBehaviour {
 
     //常驻状态管理
     public GameOverlayDialogState GameOverlay;//进入主界面叠加
-    public FightDialogState FightDialogState;//战斗界面叠加
+    public FightState FightState;//战斗界面叠加
+    public ReplayState ReplayState;//回放控制界面叠加.
     public HostEditDialogState HostEditDialogState;//服务器主机编辑界面.
     public NickNameDialogState NickNameDialogState;//昵称界面.
     public BattleStatusDialogState BattleStatusDialogState;//当局战斗信息界面
@@ -80,7 +81,6 @@ public class Main : MonoBehaviour {
     public CombatData CombatData;
     public DlcMng DlcMng;
     public GameNotice GameNotice;
-    public WayLoader WayLoader;
     public GMBLoader GMBLoader;
     public Log Log;
     public SoundManager SoundManager;
@@ -97,10 +97,9 @@ public class Main : MonoBehaviour {
     public GMCLoader GMCLoader;
     public DesLoader DesLoader;
     public SceneMng SceneMng;
-
+    public MeteorUnit LocalPlayer;
     //帧同步相关
-    public FSS FSS;
-    public FSC FSC;
+    public FrameSync FrameSync;
 
     public MeteorBehaviour MeteorBehaviour;
     public MenuResLoader MenuResLoader;
@@ -162,11 +161,12 @@ public class Main : MonoBehaviour {
 
     private void Awake()
     {
-        Instance = this;
+        Ins = this;
         Log = new Log();
         ActiveState = new List<PersistState>();
         GameOverlay = new GameOverlayDialogState();
-        FightDialogState = new FightDialogState();
+        FightState = new FightState();
+        ReplayState = new ReplayState();
         NickNameDialogState = new NickNameDialogState();
         BattleStatusDialogState = new BattleStatusDialogState();
         PlayerDialogState = new PlayerDialogState();
@@ -177,7 +177,8 @@ public class Main : MonoBehaviour {
         ItemInfoDialogState = new ItemInfoDialogState();
         GunShootDialogStatus = new GunShootDialogStatus();
         //面板管理器.
-        DialogStateManager = new MainDialogStateManager(true);
+        DialogStateManager = new MainDialogStateManager();
+        //顺序排队弹出框.
         PopupStateManager = new MainPopupStateManager();
         //各类游戏数据.
         GameStateMgr = new GameStateMgr();
@@ -185,7 +186,6 @@ public class Main : MonoBehaviour {
         AppInfo = new AppInfo();
         CombatData = new CombatData();
         GameNotice = new GameNotice();
-        WayLoader = new WayLoader();
         MeteorManager = new MeteorManager();
         ScriptMng = new ScriptMng();
         SFXLoader = new SFXLoader();
@@ -195,8 +195,7 @@ public class Main : MonoBehaviour {
         EventBus = new EventBus();
         NetWorkBattle = new NetWorkBattle();
         SceneMng = new SceneMng();
-        FSS = new FSS();
-        FSC = new FSC();
+        FrameSync = new FrameSync();
         MeteorBehaviour = new MeteorBehaviour();
         DropMng = new DropMng();
         //原版相关资源的加载器.
@@ -216,8 +215,7 @@ public class Main : MonoBehaviour {
         DlcMng = new DlcMng();
 
         DontDestroyOnLoad(gameObject);
-        UIHelper.InitCanvas(GameObject.Find("Canvas").GetComponent<Canvas>());
-        Log.WriteError(string.Format("GameStart AppVersion:{0}", Main.Instance.AppInfo.AppVersion()));
+        Log.WriteError(string.Format("GameStart AppVersion:{0}", Main.Ins.AppInfo.AppVersion()));
     }
 
     public void ShowFps(bool active)
@@ -235,6 +233,7 @@ public class Main : MonoBehaviour {
         SoundManager.Init();
         DialogStateManager.Init();
         PopupStateManager.Init();
+        DialogUtils.Ins.Init();
         UnityEngine.Random.InitState((int)System.DateTime.UtcNow.Ticks);
         DialogStateManager.ChangeState(DialogStateManager.ConnectDialogState);
         if (checkUpdate == null)

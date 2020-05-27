@@ -2,6 +2,33 @@
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+//切换武器规则
+//2类
+/*
+ * 1：按射程决定使用近战或者远程武器
+ * 2：切换到追杀模式，强制使用近战武器.
+ */
+/*
+ * 	class.Name = "火铳兵﹒乙";
+	class.Model =	5;
+	class.Weapon = 12;
+	class.Weapon2 = 14;
+	class.Team = 2;=>0不分队伍 1流星 2蝴蝶
+	class.View = 1500;=>视野100`2000
+	class.Think = 100;=>反应 0`100
+	class.Attack1	= 10;轻攻击  (攻击+防守几率< 100)
+	class.Attack2 = 50;中攻击
+	class.Attack3 = 20;重攻击
+	class.Guard =	20;防御几率 0`100
+	class.Dodge =	0;逃跑几率 0`100
+	class.Jump = 10;跳跃几率
+	class.Look = 60;张望几率
+	class.Burst = 10;速冲几率
+	class.Aim = 90;枪械射击命中率.
+	class.GetItem = 0;夺宝几率
+	class.Spawn = 88;
+	class.HP = 1500;
+ */
 namespace Idevgame.Meteor.AI
 {
     //组行为-差异化各个角色的行为，否则各个AI行为一致，感觉机械.
@@ -13,52 +40,95 @@ namespace Idevgame.Meteor.AI
 
     }
 
+    public enum NavPathStatus
+    {
+        NavPathNone,//还未开始寻找
+        NavPathCalc,//进行查询中
+        NavPathInvalid,//路径不存在
+        NavPathComplete,//成功找到路径
+        NavPathOrient,//朝向检查过程
+        NavPathIterator,//遍历路点过程中
+        NavPathFinished,//寻路过程完整结束
+    }
+
+    public enum NavType
+    {
+        NavFindUnit,//寻找角色-靠近到攻击范围内时停止寻路
+        NavFindPosition,//寻找位置-靠近到非常近时停止寻路
+    }
+
     public class StateMachine
     {
         //当Think为100时,0.1S一个行为检测,行为频率慢,则连招可能连不起来.行为频率快, 则每个招式在可切换招式的时机, 进行连招的几率越大.
+        public EventBus EventBus;
         static readonly float ThinkRound = 1000;
         float ThickTick = 0.0f;
-        Timer<int> InputTimer;//输入计时器，在活动状态下表明，还在输入指令中.
-        List<VirtualInput> InputKeys = new List<VirtualInput>();
+        List<AIVirtualInput> InputKeys = new List<AIVirtualInput>();
         public MeteorUnit Player;
-        public State PreviousState;
+        private State PreviousState;
+        private State NextState;
         public State CurrentState;
-        public State NextState;
-        public State IdleState;
+
         public State ReviveState;//队长复活队友
-        public GuardState GuardState;
+        public WaitState WaitState;//等待状态-原地发呆
+        public IdleState IdleState;//在原地等待目标进入视野
+        public GuardState GuardState;//原地防御
         public LookState LookState;//四周观察-未发现敌人时.
-        public DangerState DangerState;//处于危险中，逃跑.如果仍被敌人追上，有可能触发决斗-如果脱离了战斗视野，可能继续逃跑
+        public DodgeState DodgeState;//处于危险中，逃跑.如果仍被敌人追上，有可能触发决斗-如果脱离了战斗视野，可能继续逃跑
         public KillState KillState;//强制追杀 无视视野.
         public PatrolState PatrolState;//巡逻.
-        public FollowState FollowState;
-        public FightState FightState;
+        public FollowState FollowState;//跟随
+        public FightOnGroundState FightOnGroundState;//在地面攻击状态-主要状态
+        public FightOnAirState FightOnAirState;//在空中-次要
+        public FindState FindState;//寻找目标，并寻路到附近
+        public FaceToState FaceToState;//面向目标过程,可能是路点，可能是目标角色.被其他状态使用的
+        public PickUpState PickUpState;//拾取道具
+        public LeaveState LeaveState;//离开目标-使用远程武器，且无法切换到近战武器时.
+        public ActionType ActionIndex;//角色当前的行为编号-轻招式 重招式 绝招
 
         public float BaseTime;//角色当前动作的归一化时间 大于0部分是循环次数，小于0部分是单次播放百分比.
         public int AnimationIndex;//角色当前动画编号
-        public int ActionIndex;//角色当前的行为编号-轻招式 重招式 绝招
         public int WeaponIndex;//角色当前武器ID
+
         //战斗中
         //目标置入初始状态.
         public void Init(MeteorUnit Unit)
         {
+            EventBus = new EventBus();
             Player = Unit;
+            WaitState = new WaitState(this);
             IdleState = new IdleState(this);
             GuardState = new GuardState(this);
             KillState = new KillState(this);
             PatrolState = new PatrolState(this);
             ReviveState = new ReviveState(this);
-            FightState = new FightState(this);
+            FollowState = new FollowState(this);
+            FightOnGroundState = new FightOnGroundState(this);
+            FightOnAirState = new FightOnAirState(this);
+            LookState = new LookState(this);
+            DodgeState = new DodgeState(this);
+            FindState = new FindState(this);
+            FaceToState = new FaceToState(this);
+            PickUpState = new PickUpState(this);
+            LeaveState = new LeaveState(this);
+            InitFightWeight();
             int dis = Player.Attr.View;
-            AttackRangeMin = dis * dis;
-            AttackRangeMax = (dis + dis / 2) * (dis + dis / 2);
+            DistanceFindUnit = dis * dis;
+            DistanceMissUnit = (dis + dis / 2) * (dis + dis / 2);
             this.EnterDefaultState();
-            stoped = true;
+            stoped = false;
+        }
+
+        //得到寻路结果，所有状态共用.
+        public PathPameter Path;
+        public void OnPathCalcFinished(PathPameter pameter)
+        {
+            Path = pameter;
         }
 
         bool HasInput()
         {
-            return InputTimer != null;
+            return InputKeys.Count != 0;
         }
 
         //输入中.
@@ -67,35 +137,22 @@ namespace Idevgame.Meteor.AI
             Player.controller.Input.OnKeyDownProxy(InputKeys[0].key, true);
             Player.controller.Input.OnKeyUpProxy(InputKeys[0].key);
             InputKeys.RemoveAt(0);
-            if (InputKeys.Count == 0)
-            {
-                InputTimer.remove(OnInput);
-                InputTimer = null;
-            }
         }
 
         void EnterDefaultState()
         {
             CurrentState = IdleState;
-            CurrentState.OnEnter();
+            CurrentState.OnEnter(null);
         }
 
         public bool IsFighting()
         {
             if (CurrentState != null)
             {
-                FightState fs = CurrentState as FightState;
+                FightOnGroundState fs = CurrentState as FightOnGroundState;
                 return fs != null;
             }
             return false;
-        }
-
-
-        //根据武器系统，各类武器在战斗中使用的人工智能分别处理.
-        //但是核心是战斗部分.
-        public void OnWeaponChange(int weapon)
-        {
-            WeaponIndex = weapon;
         }
 
         public bool stoped { get; set; }
@@ -116,9 +173,6 @@ namespace Idevgame.Meteor.AI
 
         public void Update()
         {
-            if (InputTimer != null)
-                InputTimer.Update();
-
             if (stoped)
                 return;
 
@@ -148,15 +202,19 @@ namespace Idevgame.Meteor.AI
 
             //输入队列中存在指令.(有待输入的指令能否继续?-应该是只能等待被强制打断，否则一定要等输入完毕)
             if (HasInput())
+            {
+                UpdateInput();
                 return;
+            }
 
+            CurrentState.Update();
             ThickTick -= Player.Attr.Think;
             if (ThickTick > 0)
                 return;
             ThickTick = ThinkRound;
 
             //更新当前状态，内部自带状态切换.
-            CurrentState.Update();//每当暗杀模式时，若自己是队长，寻找到死亡同伴，有一定概率去复活同伴
+            CurrentState.Think();//每当暗杀模式时，若自己是队长，寻找到死亡同伴，有一定概率去复活同伴
             //复活队友状态
             //战斗状态
             //待机状态
@@ -209,12 +267,20 @@ namespace Idevgame.Meteor.AI
             Actions.Add(new ActionWeight(ActionType.Dodge, Player.Attr.Dodge));//闪避
             Actions.Add(new ActionWeight(ActionType.Jump, Player.Attr.Jump));//跳跃
             Actions.Add(new ActionWeight(ActionType.Look, Player.Attr.Look));//观看四周
-            Actions.Add(new ActionWeight(ActionType.Burst, Player.Attr.Burst));//爆气
-            Actions.Add(new ActionWeight(ActionType.Aim, Player.Attr.Aim));//瞄准
+            Actions.Add(new ActionWeight(ActionType.Burst, Player.Attr.Burst));//速冲
             Actions.Add(new ActionWeight(ActionType.GetItem, Player.Attr.GetItem));//视野范围内有物品-去拾取的几率
         }
 
-        //设置某个行为在当前状态是无法使用的.
+        //设置全部行为重置.都可挑选
+        public void ResetAction()
+        {
+            for (int i = 0; i < Actions.Count; i++)
+            {
+                Actions[i].enable = true;
+            }
+        }
+
+        //单独设置某个行为在当前状态是无法使用的.
         public void SetActionTriggered(ActionType action, bool trigger)
         {
             for (int i = 0; i < Actions.Count; i++)
@@ -225,6 +291,14 @@ namespace Idevgame.Meteor.AI
                     break;
                 }
             }
+        }
+
+        //根据角色当前的环境，设置一些行为可否进行，比如拾取道具，复活队友.
+        public void UpdateEnviroument()
+        {
+            //如果周围有可拾取的道具，那么更新可拾取状态
+            //如果使用远程武器，更新是否可防御
+            
         }
 
         //按随机权重比，设置接下来的动作
@@ -247,27 +321,69 @@ namespace Idevgame.Meteor.AI
                 if (rand < 0)
                     break;
             }
-            ActionIndex = (int)Actions[idx].action;
+            ActionIndex = Actions[idx].action;
         }
 
-        //硬切
-        public void ChangeState(State Target, Object data = null)
+        public void DoAction()
+        {
+            switch (ActionIndex)
+            {
+                //按键操作.
+                case ActionType.Attack1:
+                    break;
+                case ActionType.Attack2:
+                    break;
+                case ActionType.Attack3:
+                    break;
+                case ActionType.Guard:
+                    break;
+                case ActionType.Burst:
+                    break;
+                case ActionType.Jump:
+                    break;
+                //状态切换.
+                case ActionType.Dodge:
+                    ChangeState(DodgeState);
+                    break;
+                case ActionType.GetItem:
+                    ChangeState(PickUpState);
+                    break;
+                case ActionType.Look:
+                    ChangeState(LookState);
+                    break;
+            }
+        }
+
+        //软切-状态自上次状态继续运行.
+        public void ResumeState(State Target, object data = null)
         {
             if (CurrentState != Target)
             {
                 NextState = Target;
-                CurrentState.OnExit();
+                CurrentState.OnPause(NextState);
                 PreviousState = CurrentState;
-                Target.OnEnter(data);
+                Target.OnResume(PreviousState, data);
                 CurrentState = Target;
             }
         }
 
-        float AttackRangeMin;//视野范围最小值的平方-近战武器，在此范围内可发现 View的一半的平方  View为400时，此值为200^2
-        float AttackRangeMax;//视野范围最大值的平方-近战武器，超过此范围可丢失 View的一半的平方+一半 View为400时，此值为300^2
-        void RefreshTarget()
+        //硬切-强制重置状态.
+        public void ChangeState(State Target, object data = null)
         {
-            //MeteorUnit temp = lockTarget;
+            if (CurrentState != Target)
+            {
+                NextState = Target;
+                CurrentState.OnExit(NextState);
+                PreviousState = CurrentState;
+                Target.OnEnter(PreviousState, data);
+                CurrentState = Target;
+            }
+        }
+
+        float DistanceFindUnit;//进入视野范围可观察到
+        float DistanceMissUnit;//离开视野范围后丢失
+        public void RefreshTarget()
+        {
             if (Player.LockTarget == null || Player.LockTarget.Dead)
                 SelectEnemy();
             else
@@ -290,7 +406,7 @@ namespace Idevgame.Meteor.AI
                     }
                     else
                     {
-                        if (d >= AttackRangeMax)//超过距离以免不停的切换目标
+                        if (d >= DistanceMissUnit)//超过距离以免不停的切换目标
                             Player.LockTarget = null;
                     }
                 }
@@ -307,7 +423,7 @@ namespace Idevgame.Meteor.AI
                 else
                 {
                     float d = Vector3.SqrMagnitude(Player.TargetItem.transform.position - Player.transform.position);
-                    if (d > AttackRangeMax)
+                    if (d > DistanceMissUnit)
                         Player.TargetItem = null;
                 }
             }
@@ -317,7 +433,7 @@ namespace Idevgame.Meteor.AI
         public void SelectEnemy()
         {
             Player.LockTarget = null;
-            float dis = AttackRangeMin;//视野，可能指的是直径，这里变为半径,平方比开方快.
+            float dis = DistanceFindUnit;//视野，可能指的是直径，这里变为半径,平方比开方快.
             int index = -1;
             MeteorUnit tar = null;
             Collider[] other = Physics.OverlapSphere(Player.transform.position, Player.Attr.View, 1 << LayerMask.NameToLayer("Monster") | 1 << LayerMask.NameToLayer("LocalPlayer"));
@@ -356,13 +472,13 @@ namespace Idevgame.Meteor.AI
 
         void SelectSceneItem()
         {
-            float dis = AttackRangeMin;
+            float dis = DistanceFindUnit;
             int index = -1;
             SceneItemAgent tar = null;
             //直接遍历算了
-            for (int i = 0; i < Main.Instance.MeteorManager.SceneItems.Count; i++)
+            for (int i = 0; i < Main.Ins.MeteorManager.SceneItems.Count; i++)
             {
-                SceneItemAgent item = Main.Instance.MeteorManager.SceneItems[i].gameObject.GetComponent<SceneItemAgent>();
+                SceneItemAgent item = Main.Ins.MeteorManager.SceneItems[i].gameObject.GetComponent<SceneItemAgent>();
                 if (item == null)
                     continue;
                 if (!item.CanPickup())
@@ -375,7 +491,7 @@ namespace Idevgame.Meteor.AI
                     tar = item;
                 }
             }
-            if (index >= 0 && index < Main.Instance.MeteorManager.SceneItems.Count && tar != null)
+            if (index >= 0 && index < Main.Ins.MeteorManager.SceneItems.Count && tar != null)
                 Player.TargetItem = tar;
         }
 
@@ -389,6 +505,22 @@ namespace Idevgame.Meteor.AI
 
         }
 
+        //自动状态切换
+        public void AutoChangeState()
+        {
+            if (Player.KillTarget != null && !Player.KillTarget.Dead)
+            {
+                ChangeState(KillState);
+            }
+            else if (Player.LockTarget != null && !Player.LockTarget.Dead)
+            {
+                ChangeState(FightOnGroundState);
+            }
+            else if (Player.FollowTarget != null && !Player.FollowTarget.Dead)
+            {
+                ChangeState(FollowState);
+            }
+        }
         //可能是被卡住.
         float touchLast = 0.0f;
         const float touchWallLimit = 1.0f;
@@ -403,11 +535,8 @@ namespace Idevgame.Meteor.AI
 
         //如果attacker为空，则代表是非角色伤害了自己
         Dictionary<MeteorUnit, float> Hurts = new Dictionary<MeteorUnit, float>();//仇恨值.战斗圈内谁的仇恨高，就选择谁.
-        public List<WayPoint> Path = new List<WayPoint>();//存储寻路找到的路线点
         public void OnDamaged(MeteorUnit attacker)
         {
-            //寻路数据要清空.
-            Path.Clear();
             if (attacker == null)
             {
 
@@ -434,7 +563,7 @@ namespace Idevgame.Meteor.AI
         public void FollowTarget(int target)
         {
             MeteorUnit followed = U3D.GetUnit(target);
-            if (Main.Instance.MeteorManager.LeavedUnits.ContainsKey(target))
+            if (Main.Ins.MeteorManager.LeavedUnits.ContainsKey(target))
                 return;
             Player.FollowTarget = followed;
             ChangeState(FollowState);
@@ -445,35 +574,110 @@ namespace Idevgame.Meteor.AI
         {
             PatrolState.SetPatrolPath(path);
         }
+
+        public void UpdateInput()
+        {
+            if (InputKeys[0].state == 0)
+            {
+                Player.controller.Input.OnKeyDownProxy(InputKeys[0].key, true);
+                InputKeys[0].state = 1;
+            }
+            else if (InputKeys[0].state == 1)
+            {
+                Player.controller.Input.OnKeyUpProxy(InputKeys[0].key);
+                InputKeys[0].state = 2;
+            }
+            else if (InputKeys[0].state == 2)
+            {
+                InputKeys.RemoveAt(0);
+            }
+        }
+
+        public void ReceiveInput(EKeyList key)
+        {
+            if (HasInput())
+            {
+                UnityEngine.Debug.Log("error");
+                InputKeys.Add(new AIVirtualInput(key));
+            }
+        }
+
+        public void ReceiveInputs(List<EKeyList> key)
+        {
+            if (HasInput())
+                UnityEngine.Debug.Log("error");
+            if (key.Count != 0)
+            {
+                for (int i = 0; i < key.Count; i++)
+                {
+                    InputKeys.Add(new AIVirtualInput(key[i]));
+                }
+            }
+        }
     }
 
     public abstract class State
     {
         public StateMachine Machine;
+        protected State Previous;
+        protected State Next;
+        public MeteorUnit Player { get { return Machine.Player; } }
+        public MeteorUnit LockTarget { get { return Machine.Player.LockTarget; } }
+        public MeteorUnit FollowTarget { get { return Machine.Player.FollowTarget; } }
+        protected List<AIVirtualInput> InputQueue = new List<AIVirtualInput>();
+        protected NavPathStatus navPathStatus;
+        protected int wayIndex;//当前遍历到的路点
+        //进入时缓存下角色当前的位置，以后每个Think更新一次位置，未更新则用上次缓存的位置，一直到离角色很近为止.
+        protected Vector3 positionStart;
+        protected Vector3 positionEnd;
+        protected Vector3 TargetPos;
+        protected NavType NavType;
         public State(StateMachine machine)
         {
             Machine = machine;
         }
 
-        public abstract void OnEnter(Object data = null);
-        public abstract void OnExit();
+        public virtual void OnEnter(State pevious, object data = null)
+        {
+            Previous = pevious;
+        }
 
-        //默认状态-待机，调用待机动作.
-        //动作结束后
+        public virtual void OnPause(State next, object data = null)
+        {
+            
+        }
+
+        public virtual void OnResume(State previous, object data = null)
+        {
+
+        }
+
+        public virtual void OnExit(State next)
+        {
+            Next = next;
+        }
+
+        //每一帧执行一次
         public virtual void Update()
         {
 
         }
 
+        //一段时间执行一次
+        public virtual void Think()
+        {
+            Machine.RefreshTarget();
+            Machine.AutoChangeState();
+        }
 
         public virtual void OnChangeWeapon()
         {
             //武器发生变化,
         }
 
-        public void ChangeState(State target)
+        public void ChangeState(State target, object data = null)
         {
-            Machine.ChangeState(target);
+            Machine.ChangeState(target, data);
         }
 
         public MeteorUnit GetKillTarget()
@@ -484,6 +688,124 @@ namespace Idevgame.Meteor.AI
         public MeteorUnit GetLockTarget()
         {
             return Machine.Player.LockTarget;
+        }
+
+        //得到某个角色的面向向量与某个位置的夹角,不考虑Y轴 
+        protected float GetAngleBetween(Vector3 vec)
+        {
+            vec.y = 0;
+            //同位置，无法计算夹角.
+            if (vec.x == Player.transform.position.x && vec.z == Player.transform.position.z)
+                return 0;
+
+            Vector3 vec1 = -Player.transform.forward;
+            Vector3 vec2 = (vec - Player.mPos2d).normalized;
+            vec2.y = 0;
+            float radian = Vector3.Dot(vec1, vec2);
+            float degree = Mathf.Acos(Mathf.Clamp(radian, -1.0f, 1.0f)) * Mathf.Rad2Deg;
+            return degree;
+        }
+
+        protected void RotateToTarget(Vector3 vec, float time, float duration, float angle, ref float offset0, ref float offset1, bool rightRotate)
+        {
+            if (vec.x == Player.transform.position.x && vec.z == Player.transform.position.z)
+                return;
+            float offsetmax = angle;
+            float timeTotal = duration;
+            float timeTick = time;
+            if (rightRotate)
+                offset1 = Mathf.Lerp(0, offsetmax, timeTick / timeTotal);
+            else
+                offset1 = -Mathf.Lerp(0, offsetmax, timeTick / timeTotal);
+            Player.SetOrientation(offset1 - offset0);
+            offset0 = offset1;
+        }
+
+        protected void NavThink()
+        {
+            switch (navPathStatus)
+            {
+                case NavPathStatus.NavPathNone:
+                    navPathStatus = NavPathStatus.NavPathCalc;
+                    PathHelper.Ins.CalcPath(Machine, positionStart, positionEnd);
+                    break;
+                case NavPathStatus.NavPathCalc:
+                    //等待寻路线程的处理.
+                    if (Machine.Path != null)
+                        navPathStatus = NavPathStatus.NavPathComplete;
+                    break;
+                case NavPathStatus.NavPathComplete:
+                    navPathStatus = NavPathStatus.NavPathOrient;
+                    if (Machine.Path.ways.Count == 0)
+                    {
+                        //寻路可直达，
+                        wayIndex = 0;
+                        TargetPos = positionEnd;
+                    }
+                    else
+                    {
+                        wayIndex = 0;
+                        TargetPos = Machine.Path.ways[wayIndex].pos;
+                    }
+                    //Machine.ChangeState(Machine.WaitState);
+                    //for (int i = 0; i < Machine.Path.ways.Count; i++)
+                    //{
+                    //    GameObject obj = new GameObject(string.Format("{0}", i));
+                    //    Idevgame.Util.ObjectUtils.Identity(obj);
+                    //    obj.transform.position = Machine.Path.ways[i].pos;
+                    //}
+                    break;
+                case NavPathStatus.NavPathInvalid:
+                    navPathStatus = NavPathStatus.NavPathIterator;
+                    ChangeState(Previous);
+                    break;
+                case NavPathStatus.NavPathIterator:
+                    //调度过程-从当前位置，到目标位置的寻路过程.
+                    break;
+            }
+        }
+
+        protected void NavUpdate()
+        {
+            if (navPathStatus == NavPathStatus.NavPathOrient){
+                //如果方向不对，先切换到转向状态
+                if (GetAngleBetween(TargetPos) >= Main.Ins.CombatData.AimDegree)
+                {
+                    navPathStatus = NavPathStatus.NavPathIterator;
+                    Machine.ChangeState(Machine.FaceToState, TargetPos);
+                    UnityEngine.Debug.Log("进入转向状态");
+                    return;
+                }
+                else{
+                    navPathStatus = NavPathStatus.NavPathIterator;
+                }
+            }
+            else if (navPathStatus == NavPathStatus.NavPathIterator)
+            {
+                if (wayIndex == Machine.Path.ways.Count - 1){
+                    //最后一个路点
+                    float distance = NavType == NavType.NavFindUnit ? CombatData.AttackRange : CombatData.StopDistance;
+                    Vector3 vector = TargetPos;
+                    vector.y = 0;
+                    if (Vector3.SqrMagnitude(vector - Player.mPos2d) <= distance){
+                        navPathStatus = NavPathStatus.NavPathFinished;
+                        UnityEngine.Debug.Log("寻路完毕，进入战斗状态");
+                        Player.controller.Input.AIMove(0, 0);
+                        return;
+                    }
+                }else{
+                    Vector3 vector = TargetPos;
+                    vector.y = 0;
+                    //不是最后一个路点
+                    if (Vector3.SqrMagnitude(vector - Player.mPos2d) <= CombatData.StopDistance){
+                        wayIndex += 1;
+                        TargetPos = Machine.Path.ways[wayIndex].pos;
+                        return;
+                    }
+                }
+                Player.FaceToTarget(TargetPos);
+                Player.controller.Input.AIMove(0, 1);
+            }
         }
     }
 }
